@@ -256,3 +256,108 @@
   )
 )
 
+;; This comprehensive function implements a dispute resolution system for storage contracts
+;; It allows users to file disputes, providers to respond, and the contract owner to arbitrate
+;; The function handles evidence submission, reputation adjustments, and payment redistribution
+(define-public (resolve-storage-dispute (contract-id uint) (dispute-type (string-ascii 20)) (evidence (buff 256)) (resolution-request (string-ascii 50)))
+  (let (
+    (caller tx-sender)
+    (contract (unwrap! (map-get? storage-contracts { contract-id: contract-id }) err-listing-not-found))
+    (provider (get provider contract))
+    (user (get user contract))
+    (total-payment (get total-payment contract))
+    (status (get status contract))
+    (provider-info (unwrap! (map-get? storage-providers { provider: provider }) err-provider-not-found))
+    (current-reputation (get reputation-score provider-info))
+    (is-owner (is-eq caller contract-owner))
+    (is-provider (is-eq caller provider))
+    (is-user (is-eq caller user))
+    (refund-amount (/ (* total-payment u3) u4))  ;; 75% refund for valid disputes
+    (provider-penalty (/ current-reputation u10)) ;; 10% reputation penalty
+  )
+    ;; validate the dispute
+    (asserts! (or is-owner is-provider is-user) err-not-authorized)
+    (asserts! (is-eq status "active") err-not-authorized)
+    
+    ;; handle different dispute resolution paths
+    (if is-owner
+      ;; contract owner arbitration (final decision)
+      (begin
+        (if (is-eq dispute-type "user-favored")
+          ;; user wins dispute
+          (begin
+            ;; refund user
+            (try! (as-contract (stx-transfer? refund-amount contract-owner user)))
+            
+            ;; penalize provider reputation
+            (map-set storage-providers
+              { provider: provider }
+              (merge provider-info {
+                reputation-score: (- current-reputation provider-penalty)
+              })
+            )
+            
+            ;; update contract status - shortened to fit within 20 chars
+            (map-set storage-contracts
+              { contract-id: contract-id }
+              (merge contract {
+                status: "resolved-user"
+              })
+            )
+          )
+          ;; provider wins dispute
+          (begin
+            ;; update contract status only - shortened to fit within 20 chars
+            (map-set storage-contracts
+              { contract-id: contract-id }
+              (merge contract {
+                status: "resolved-provider"
+              })
+            )
+          )
+        )
+        (ok true)
+      )
+      
+      ;; user or provider filing dispute
+      (begin
+        ;; record dispute details - shortened to fit within 20 chars
+        (map-set storage-contracts
+          { contract-id: contract-id }
+          (merge contract {
+            status: (if is-user "dispute-by-user" "dispute-by-provider")
+          })
+        )
+        
+        ;; store evidence on chain (in a real contract, this would likely be a hash of off-chain evidence)
+        (print evidence)
+        (print resolution-request)
+        
+        ;; notify contract owner - print strings and integers separately
+        (print "Dispute filed for contract:")
+        (print contract-id)  ;; print the contract ID directly as an integer
+        (print (if is-user "Filed by: user" "Filed by: provider"))
+        
+        ;; if automatic resolution criteria are met, handle immediately
+        (if (and is-user (> (len evidence) u128))  ;; example of a simple auto-resolution rule
+          (begin
+            ;; auto-refund 50% to user for substantial evidence
+            (try! (as-contract (stx-transfer? (/ total-payment u2) contract-owner user)))
+            
+            ;; update contract status - shortened to fit within 20 chars
+            (map-set storage-contracts
+              { contract-id: contract-id }
+              (merge contract {
+                status: "auto-resolved"
+              })
+            )
+            (ok true)
+          )
+          ;; otherwise, await manual resolution
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
